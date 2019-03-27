@@ -9,12 +9,7 @@
 
 #define MESSAGE_PRESSURE 0x631
 
-union Measure {
-  float f;
-  byte b[4];
-};
-
-Measure pressure_kPa;
+long pressure_Pa;
 
 void setup() {
   Serial.begin(BAUD_RATE);
@@ -33,10 +28,9 @@ void loop() {
       
       switch (message.id) {
         case MESSAGE_PRESSURE:
-          for (int i = 0; i < 4; i++)
-            pressure_kPa.b[i] = message.data[i];
-          Serial.print(pressure_kPa.f);
-          Serial.println(" kPa");
+          memcpy(&pressure_Pa, message.data, 4);
+          Serial.print(pressure_Pa);
+          Serial.println(" Pa");
           break;
       }
     }

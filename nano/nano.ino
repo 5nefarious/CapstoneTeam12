@@ -4,23 +4,22 @@
 #include <mcp2515.h>
 #include <defaults.h>
 
-#define SUPPLY_VOLTAGE 5
+#define SUPPLY_VOLTAGE 5000
+#define BAUD_RATE 9600
 #define REFRESH_RATE 100
 #define ADC_RESOLUTION 1024
 
 #define MESSAGE_PRESSURE 0x631
 
-float get_pressure_from_voltage(float v);
-
-union Measure {
-  float f;
-  byte b[4];
-};
+#define GET_PRESSURE_FROM_VOLTAGE(X) (X * 1000 / SUPPLY_VOLTAGE - 40) * 11
 
 int pressureSensorPin = A0;
-Measure pressure_kPa;
+long pressure_Pa;
 
 void setup() {
+  Serial.begin(BAUD_RATE);
+  delay(1000);
+  
   if (Canbus.init(CANSPEED_500))
     Serial.println("CAN bus initialized.");
   else
@@ -29,21 +28,23 @@ void setup() {
 
 void loop() {
   int pressureSensorValue = analogRead(pressureSensorPin);
-  float pressureSensorVoltage = pressureSensorValue * SUPPLY_VOLTAGE / (float) ADC_RESOLUTION;
-  pressure_kPa.f = get_pressure_from_voltage(pressureSensorVoltage);
+  long pressureSensorVoltage = (long) pressureSensorValue * SUPPLY_VOLTAGE / ADC_RESOLUTION;
+  pressure_Pa = GET_PRESSURE_FROM_VOLTAGE(pressureSensorVoltage);
 
   tCAN message;
   message.id = MESSAGE_PRESSURE;
   message.header.rtr = 0;
   message.header.length = 4;
-  for (int i = 0; i < 4; i++)
-    message.data[i] = pressure_kPa.b[i];
+  memcpy(message.data, &pressure_Pa, 4);
   mcp2515_bit_modify(CANCTRL, (1 << REQOP2) | (1 << REQOP1) | (1 << REQOP0), 0);
   mcp2515_send_message(&message);
-  
-  delay(1000 / REFRESH_RATE);
-}
 
-float get_pressure_from_voltage(float voltage) {
-  return (voltage / SUPPLY_VOLTAGE - 0.04) / 0.09;
+  Serial.print(pressureSensorValue);
+  Serial.print(", ");
+  Serial.print(pressureSensorVoltage);
+  Serial.print(" mV, ");
+  Serial.print(pressure_Pa);
+  Serial.println(" Pa");
+
+  delay(1000 / REFRESH_RATE);
 }
