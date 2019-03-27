@@ -5,7 +5,7 @@
 #include <defaults.h>
 
 #define BAUD_RATE 9600
-#define REFRESH_RATE 10
+#define REFRESH_RATE 1000
 
 #define MESSAGE_PRESSURE 0x631
 

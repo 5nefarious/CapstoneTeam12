@@ -5,7 +5,7 @@
 #include <defaults.h>
 
 #define SUPPLY_VOLTAGE 5
-#define REFRESH_RATE 5
+#define REFRESH_RATE 100
 #define ADC_RESOLUTION 1024
 
 #define MESSAGE_PRESSURE 0x631
