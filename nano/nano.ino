@@ -5,10 +5,12 @@
 #include <defaults.h>
 #include <limits.h>
 
+#include <VetMed_utils.h>
+
+#define DEVICE_THIS DEVICE_REAR
+
 // Constants
 #define SUPPLY_VOLTAGE 5000
-#define BAUD_RATE 9600
-#define REFRESH_RATE 10
 #define ADC_RESOLUTION 1024
 
 #define PIN_PRESSURE_SENSOR   A0
@@ -19,49 +21,16 @@
 #define NUM_ENCODER_ANGLE_BITS    9
 #define NUM_ENCODER_STATUS_BITS   5
 
-// Devices on network
-#define DEVICE_HEAD   0x0
-#define DEVICE_REAR   0x1
-#define DEVICE_THIS DEVICE_REAR
-
-// Message types
-// Note: Restricted to 7 bits. MSB will be dropped.
-#define MESSAGE_PAIN          0x01
-#define MESSAGE_KEY_VALUE     0x02
-#define MESSAGE_GET_KEY       0x03
-#define MESSAGE_SET_KEY       0x04
-#define MESSAGE_CAPTURE_KEY   0x05
-#define MESSAGE_RESET_KEY     0x06
-
-// Sensor subsystem
-#define SENSOR_PROSTATE   0x00
-#define SENSOR_SPHINCTER  0x01
-
-#define NUM_SENSORS 2
-
-// Parameter keys
-#define KEY_ENABLED       0x00
-#define KEY_VALUE         0x01
-#define KEY_THRESHOLD_1   0x02
-#define KEY_THRESHOLD_2   0x03
-#define KEY_THRESHOLD_3   0x04
-
-#define NUM_KEYS 5
+#include "config.h"
 
 #define GET_PRESSURE_FROM_VOLTAGE(X) (X * 1000 / SUPPLY_VOLTAGE - 40) * 11
 
-static void send_key(byte sub, byte key);
-static void send_pain(byte sub, byte level);
-static void send_message(byte type, bool rtr, size_t len);
-
 static tCAN message;
-static long defaults[NUM_SENSORS][NUM_KEYS] = {
-  { 0, 0, LONG_MAX, LONG_MAX, LONG_MAX },
-  { 1, 0, 512, 640, 768 },
-};
 static long params[NUM_SENSORS][NUM_KEYS];
 static byte flags;
+static byte sub, key;
 
+unsigned long last_time = 0;
 static long last_encoder_angle = 0;
 static long encoder_angle;
 static byte encoder_status;
@@ -83,17 +52,22 @@ void setup() {
   pinMode(PIN_ENCODER_CS, OUTPUT);
   digitalWrite(PIN_ENCODER_CLOCK, LOW);
 
-  memcpy(params, defaults, sizeof params);
+  Serial.println(F("Copying default parameters..."));
+  memcpy_P(params, defaults, sizeof params);
 
   // Initialize CANBus
   if (Canbus.init(CANSPEED_500))
-    Serial.println("CAN bus initialized.");
+    Serial.println(F("CAN bus initialized."));
   else
-    Serial.println("CAN controller failed initialization!");
+    Serial.println(F("CAN controller failed initialization!"));
+
+  Serial.println(F("Initialization finished. Stopping serial comm..."));
+  Serial.end();
+
+  last_time = millis();
 }
 
 void loop() {
-  byte sub, key;
   long val;
 
   flags = 0; // clear all flags
@@ -110,13 +84,13 @@ void loop() {
           flags |= FLAG_SEND;
           break;
         case MESSAGE_SET_KEY:
-          flags |= FLAG_SET;
+          flags |= FLAG_SET | FLAG_SEND;
           break;
         case MESSAGE_CAPTURE_KEY:
-          flags |= FLAG_CAPTURE;
+          flags |= FLAG_CAPTURE | FLAG_SEND;
           break;
         case MESSAGE_RESET_KEY:
-          flags |= FLAG_RESET;
+          flags |= FLAG_RESET | FLAG_SEND;
         }
 
         if (flags > 0) {
@@ -129,35 +103,29 @@ void loop() {
               key < 0 || key >= NUM_KEYS)
             flags = 0;
 
-          Serial.print(sub, HEX);
-          Serial.print(", ");
-          Serial.print(key, HEX);
-          Serial.print(", ");
-          Serial.println(val);
+//          Serial.print(sub, HEX);
+//          Serial.print(", ");
+//          Serial.print(key, HEX);
+//          Serial.print(", ");
+//          Serial.println(val);
         }
       }
     }
   }
 
-  if (params[SENSOR_PROSTATE][KEY_ENABLED]) {
+  if (params[SENSOR_PROSTATE][KEY_STATUS] > 0) {
     
     // Measure pressure in prostate
     int pressure_sensor_value = analogRead(PIN_PRESSURE_SENSOR);
     long pressure_sensor_voltage = (long) pressure_sensor_value
                                      * SUPPLY_VOLTAGE / ADC_RESOLUTION;
-    params[SENSOR_PROSTATE][KEY_VALUE]
+    params[SENSOR_PROSTATE][KEY_READING]
       = GET_PRESSURE_FROM_VOLTAGE(pressure_sensor_voltage);
   
-    // Test pain thresholds in prostate
-    for (int i = KEY_THRESHOLD_3; i >= KEY_THRESHOLD_1; i--) {
-      if (params[SENSOR_PROSTATE][KEY_VALUE] > params[SENSOR_PROSTATE][i]) {
-        send_pain(SENSOR_PROSTATE, i - KEY_THRESHOLD_1 + 1);
-        break;
-      }
-    }
+    process_sensor_value(SENSOR_PROSTATE);
   }
 
-  if (params[SENSOR_SPHINCTER][KEY_ENABLED]) {
+  if (params[SENSOR_ANUS][KEY_STATUS] > 0) {
     
     // Send CS pulse to notify sensor
     digitalWrite(PIN_ENCODER_CS, HIGH);
@@ -171,30 +139,44 @@ void loop() {
     last_encoder_angle = encoder_angle;
     encoder_angle = encoder_bits >> 6;
     encoder_status = 0x3F & encoder_bits;
-    params[SENSOR_SPHINCTER][KEY_VALUE] = encoder_angle;
-
-    Serial.println(encoder_angle);
+    unsigned long time_now = millis();
+    long time_delta = time_now - last_time;
+    params[SENSOR_ANUS][KEY_READING] = 100 * (last_encoder_angle - encoder_angle) / time_delta;
+    last_time = time_now;
   
-    // Test pain thresholds in sphincter
-    for (int i = KEY_THRESHOLD_3; i >= KEY_THRESHOLD_1; i--) {
-      if (params[SENSOR_SPHINCTER][KEY_VALUE] > params[SENSOR_SPHINCTER][i]) {
-        send_pain(SENSOR_SPHINCTER, i - KEY_THRESHOLD_1 + 1);
-        break;
-      }
-    }
+    process_sensor_value(SENSOR_ANUS);
   }
  
   if (flags & FLAG_SET)
     params[sub][key] = val;
 
-  if (flags & FLAG_SEND)
-    send_key(sub, key);
-
   if (flags & FLAG_CAPTURE)
-    params[sub][key] = params[sub][KEY_VALUE];
+    params[sub][key] = params[sub][KEY_READING];
 
   if (flags & FLAG_RESET)
     params[sub][key] = defaults[sub][key];
+
+  if (flags & FLAG_SEND)
+    send_key(sub, key);
+}
+
+static void process_sensor_value(byte sensor) {
+
+  // Test pain thresholds in reverse
+  // (Highest threshold triggered is sent)
+  for (int i = KEY_THRESHOLD_3; i >= KEY_THRESHOLD_1; i--) {
+    if (params[sensor][KEY_READING] > params[sensor][i]) {
+      send_pain(sensor, i - KEY_THRESHOLD_1 + 1);
+      break;
+    }
+  }
+
+  // Send logs if requested
+  if (params[sensor][KEY_STATUS] == STATUS_LOG) {
+    send_key(sensor, KEY_READING);
+    if (sub == sensor && key == KEY_READING)
+      flags &= ~FLAG_SEND;
+  }
 
   delay(1000 / REFRESH_RATE);
 }
